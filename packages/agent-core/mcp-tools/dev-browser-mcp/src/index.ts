@@ -25,6 +25,8 @@ import {
   listPages,
   closePage,
   getConnectionMode,
+  getCDPSession,
+  getFullPageName,
 } from './connection.js';
 
 console.error('[dev-browser-mcp] All imports completed successfully');
@@ -343,6 +345,200 @@ async function waitForPageLoad(page: Page, timeout = 3000): Promise<void> {
     // intentionally empty
   }
 }
+
+const DEFAULT_MAX_SCREENSHOT_BYTES = 120_000;
+const MAX_SCREENSHOT_BYTES = (() => {
+  const parsed = Number.parseInt(process.env.DEV_BROWSER_MCP_MAX_SCREENSHOT_BYTES ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_SCREENSHOT_BYTES;
+})();
+
+interface BoundedScreenshot {
+  buffer: Buffer | null;
+  fullPageUsed: boolean;
+  qualityUsed: number;
+  byteLength: number;
+}
+
+async function captureBoundedScreenshot(
+  page: Page,
+  fullPageRequested: boolean,
+): Promise<BoundedScreenshot> {
+  const attempts = fullPageRequested
+    ? [
+        { fullPage: true, quality: 70 },
+        { fullPage: true, quality: 55 },
+        { fullPage: false, quality: 50 },
+        { fullPage: false, quality: 40 },
+      ]
+    : [
+        { fullPage: false, quality: 70 },
+        { fullPage: false, quality: 55 },
+        { fullPage: false, quality: 40 },
+      ];
+
+  let lastAttempt = attempts[attempts.length - 1];
+  let lastByteLength = 0;
+
+  for (const attempt of attempts) {
+    const buffer = await page.screenshot({
+      fullPage: attempt.fullPage,
+      type: 'jpeg',
+      quality: attempt.quality,
+      // Avoid retina-scale screenshots that explode payload size.
+      scale: 'css',
+    });
+
+    if (buffer.byteLength <= MAX_SCREENSHOT_BYTES) {
+      return {
+        buffer,
+        fullPageUsed: attempt.fullPage,
+        qualityUsed: attempt.quality,
+        byteLength: buffer.byteLength,
+      };
+    }
+
+    lastAttempt = attempt;
+    lastByteLength = buffer.byteLength;
+  }
+
+  return {
+    buffer: null,
+    fullPageUsed: lastAttempt.fullPage,
+    qualityUsed: lastAttempt.quality,
+    byteLength: lastByteLength,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Screencast helpers (ENG-695)
+// Contributed by samarthsinh2660 (PR #414): startScreencast / stopScreencast
+// emit JSON frames to stdout; OpenCodeAdapter parses them and emits
+// 'browser-frame' events consumed by the renderer.
+// ---------------------------------------------------------------------------
+
+/** Target ~10 FPS — enough for live preview without flooding stdout */
+const FRAME_INTERVAL_MS = 100;
+
+/**
+ * Track the active screencast frame handler per page name.
+ * This ensures we remove the old listener before attaching a new one,
+ * preventing duplicate frames after navigation (idempotent screencast).
+ */
+const activeFrameHandlers = new Map<string, (event: { data: string; sessionId: number }) => void>();
+
+/**
+ * Guards against concurrent startScreencast calls for the same page.
+ * If a screencast is already being initialised for a given pageKey, subsequent
+ * calls are dropped until the in-flight promise settles.
+ */
+const screencastStarting = new Set<string>();
+
+async function startScreencast(pageName?: string): Promise<void> {
+  const pageKey = pageName || 'main';
+  const fullPageName = getFullPageName(pageName);
+
+  // In-flight lock: skip if this page is already being started (Fix 3).
+  if (screencastStarting.has(pageKey)) {
+    return;
+  }
+  screencastStarting.add(pageKey);
+
+  try {
+    // Use getPage() to honour activePageOverride — the same resolved page that
+    // browser_navigate() already navigated, not just the raw string name (Fix 4).
+    const resolvedPage = await getPage(pageName);
+    const context = resolvedPage.context();
+    const session = await context.newCDPSession(resolvedPage);
+
+    // Remove any existing frame handler for this page before adding a new one
+    const existingHandler = activeFrameHandlers.get(pageKey);
+    if (existingHandler) {
+      session.off('Page.screencastFrame', existingHandler);
+      activeFrameHandlers.delete(pageKey);
+    }
+
+    // Stop any running screencast before restarting (idempotent)
+    await session.send('Page.stopScreencast').catch(() => {});
+
+    await session.send('Page.startScreencast', {
+      format: 'jpeg',
+      quality: 50,
+      maxWidth: 800,
+      everyNthFrame: 1,
+    } as Parameters<typeof session.send>[1]);
+
+    let lastFrameTime = 0;
+
+    const frameHandler = async (event: { data: string; sessionId: number }) => {
+      try {
+        const now = Date.now();
+
+        // Throttle to avoid flooding stdout
+        if (now - lastFrameTime < FRAME_INTERVAL_MS) {
+          await session
+            .send('Page.screencastFrameAck', { sessionId: event.sessionId } as Parameters<
+              typeof session.send
+            >[1])
+            .catch(() => {});
+          return;
+        }
+
+        lastFrameTime = now;
+
+        const taskId = process.env.ACCOMPLISH_TASK_ID || 'default';
+        console.log(
+          JSON.stringify({
+            type: 'browser-frame',
+            taskId,
+            pageName: pageName || 'main',
+            frame: event.data,
+            timestamp: now,
+          }),
+        );
+
+        await session
+          .send('Page.screencastFrameAck', { sessionId: event.sessionId } as Parameters<
+            typeof session.send
+          >[1])
+          .catch(() => {});
+      } catch (err) {
+        console.error('[dev-browser-mcp] Error handling screencast frame:', err);
+      }
+    };
+
+    activeFrameHandlers.set(pageKey, frameHandler);
+    session.on('Page.screencastFrame', frameHandler);
+    console.error(`[dev-browser-mcp] Screencast started for page: ${fullPageName}`);
+  } catch (err) {
+    console.error(`[dev-browser-mcp] Failed to start screencast for ${fullPageName}:`, err);
+  } finally {
+    // Release the in-flight lock regardless of success or failure (Fix 3).
+    screencastStarting.delete(pageKey);
+  }
+}
+
+async function _stopScreencast(pageName?: string): Promise<void> {
+  const pageKey = pageName || 'main';
+  const fullPageName = getFullPageName(pageName);
+
+  try {
+    const session = await getCDPSession(pageName);
+
+    // Remove the tracked frame handler before stopping
+    const existingHandler = activeFrameHandlers.get(pageKey);
+    if (existingHandler) {
+      session.off('Page.screencastFrame', existingHandler);
+      activeFrameHandlers.delete(pageKey);
+    }
+
+    await session.send('Page.stopScreencast');
+    console.error(`[dev-browser-mcp] Screencast stopped for page: ${fullPageName}`);
+  } catch (err) {
+    console.error(`[dev-browser-mcp] Failed to stop screencast for ${fullPageName}:`, err);
+  }
+}
+
+// ---------------------------------------------------------------------------
 
 const SNAPSHOT_SCRIPT = `
 (function() {
@@ -1411,9 +1607,7 @@ async function getAISnapshot(page: Page, options: SnapshotOptions = {}): Promise
   };
 
   const result = await page.evaluate(
-    (opts) => {
-      return (globalThis as any).__devBrowser_getAISnapshot(opts);
-    },
+    (opts) => (globalThis as any).__devBrowser_getAISnapshot(opts),
     optsToSend,
   );
   return result as string;
@@ -2507,6 +2701,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToo
           await waitForPageLoad(page);
           await injectActiveTabGlow(page);
 
+          // Auto-start screencast so the UI always has a live preview available.
+          // Fire-and-forget — failure here should never break navigation.
+          // Contributed by samarthsinh2660 (PR #414) for ENG-695.
+          void startScreencast(page_name);
+
           const title = await page.title();
           const currentUrl = page.url();
           const viewport = page.viewportSize();
@@ -2886,17 +3085,35 @@ The page has loaded. Use browser_snapshot() to see the page elements and find in
         case 'browser_screenshot': {
           const { page_name, full_page } = args as BrowserScreenshotInput;
           const page = await getPage(page_name);
+          const requestedFullPage = full_page ?? false;
+          const screenshot = await captureBoundedScreenshot(page, requestedFullPage);
 
-          const screenshotBuffer = await page.screenshot({
-            fullPage: full_page ?? false,
-            type: 'jpeg',
-            quality: 80,
-          });
+          if (!screenshot.buffer) {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    `Screenshot skipped: image remained ${screenshot.byteLength} bytes after compression ` +
+                    `(max ${MAX_SCREENSHOT_BYTES} bytes). Use browser_snapshot() for a lightweight page view.`,
+                },
+              ],
+              isError: true,
+            };
+          }
 
-          const base64 = screenshotBuffer.toString('base64');
+          const base64 = screenshot.buffer.toString('base64');
+          const fallbackNote =
+            requestedFullPage && !screenshot.fullPageUsed
+              ? ' Full-page capture was reduced to viewport to stay within size limits.'
+              : '';
 
           return {
             content: [
+              {
+                type: 'text',
+                text: `Screenshot captured (${screenshot.byteLength} bytes, JPEG quality ${screenshot.qualityUsed}).${fallbackNote}`,
+              },
               {
                 type: 'image',
                 data: base64,
@@ -3221,17 +3438,24 @@ The page has loaded. Use browser_snapshot() to see the page elements and find in
                 }
 
                 case 'screenshot': {
-                  const buffer = await page.screenshot({
-                    fullPage: step.fullPage ?? false,
-                    type: 'jpeg',
-                    quality: 80,
-                  });
+                  const requestedFullPage = step.fullPage ?? false;
+                  const screenshot = await captureBoundedScreenshot(page, requestedFullPage);
+                  if (!screenshot.buffer) {
+                    results.push(
+                      `${stepNum}. Screenshot skipped (still ${screenshot.byteLength} bytes after compression; max ${MAX_SCREENSHOT_BYTES})`,
+                    );
+                    break;
+                  }
                   screenshotData = {
                     type: 'image',
                     mimeType: 'image/jpeg',
-                    data: buffer.toString('base64'),
+                    data: screenshot.buffer.toString('base64'),
                   };
-                  results.push(`${stepNum}. Screenshot taken`);
+                  results.push(
+                    requestedFullPage && !screenshot.fullPageUsed
+                      ? `${stepNum}. Screenshot taken (auto-switched to viewport to stay under ${MAX_SCREENSHOT_BYTES} bytes)`
+                      : `${stepNum}. Screenshot taken (${screenshot.byteLength} bytes)`,
+                  );
                   break;
                 }
 

@@ -11,12 +11,16 @@ import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import ConversationListItem from './ConversationListItem';
 import SettingsDialog from './SettingsDialog';
-import { Settings, MessageSquarePlus, Search } from 'lucide-react';
+import WorkspaceSelector from './WorkspaceSelector';
+import { Gear, ChatText, MagnifyingGlass } from '@phosphor-icons/react';
 import logoImage from '/assets/logo-1.png';
 
 export default function Sidebar() {
   const navigate = useNavigate();
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    'providers' | 'voice' | 'skills' | 'connectors' | 'workspaces' | 'about'
+  >('providers');
   const { tasks, loadTasks, updateTaskStatus, addTaskUpdate, openLauncher } = useTaskStore();
   const accomplish = getAccomplish();
   const { t } = useTranslation('sidebar');
@@ -49,6 +53,16 @@ export default function Sidebar() {
   return (
     <>
       <div className="flex h-screen w-[260px] flex-col border-r border-border bg-card pt-12">
+        {/* Workspace Selector */}
+        <div className="px-3 pt-3 pb-1">
+          <WorkspaceSelector
+            onManageWorkspaces={() => {
+              setSettingsInitialTab('workspaces');
+              setShowSettings(true);
+            }}
+          />
+        </div>
+
         {/* Action Buttons */}
         <div className="px-3 py-3 border-b border-border flex gap-2">
           <Button
@@ -59,7 +73,7 @@ export default function Sidebar() {
             className="flex-1 justify-center gap-2"
             title={t('newTask')}
           >
-            <MessageSquarePlus className="h-4 w-4" />
+            <ChatText className="h-4 w-4" />
             {t('newTask')}
           </Button>
           <Button
@@ -69,7 +83,7 @@ export default function Sidebar() {
             className="px-2"
             title={t('searchTasks')}
           >
-            <Search className="h-4 w-4" />
+            <MagnifyingGlass className="h-4 w-4" />
           </Button>
         </div>
 
@@ -121,15 +135,22 @@ export default function Sidebar() {
             data-testid="sidebar-settings-button"
             variant="ghost"
             size="icon"
-            onClick={() => setShowSettings(true)}
+            onClick={() => {
+              setSettingsInitialTab('providers');
+              setShowSettings(true);
+            }}
             title={t('settings')}
           >
-            <Settings className="h-4 w-4" />
+            <Gear className="h-4 w-4" />
           </Button>
         </div>
       </div>
 
-      <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
+      <SettingsDialog
+        open={showSettings}
+        onOpenChange={setShowSettings}
+        initialTab={settingsInitialTab}
+      />
     </>
   );
 }

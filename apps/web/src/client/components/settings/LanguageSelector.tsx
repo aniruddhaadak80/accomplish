@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Globe, ChevronDown } from 'lucide-react';
+import { Globe, CaretDown } from '@phosphor-icons/react';
 import { changeLanguage, getLanguagePreference } from '@/i18n';
 import {
   DropdownMenu,
@@ -15,6 +15,8 @@ import { cn } from '@/lib/utils';
 const AUTO_LABELS: Record<string, string> = {
   en: 'Auto (System)',
   'zh-CN': '自动（跟随系统）',
+  ru: 'Авто (Система)',
+  fr: 'Auto (Système)',
 };
 const AUTO_FALLBACK = 'Auto (System)';
 
@@ -29,6 +31,8 @@ const LANGUAGE_OPTIONS = [
   { value: 'auto' as const, label: autoLabel },
   { value: 'en' as const, label: 'English' },
   { value: 'zh-CN' as const, label: '简体中文' },
+  { value: 'ru' as const, label: 'Русский' },
+  { value: 'fr' as const, label: 'Français' },
 ];
 
 type LanguageValue = (typeof LANGUAGE_OPTIONS)[number]['value'];
@@ -76,7 +80,7 @@ export function LanguageSelector() {
                 )}
               >
                 <span>{currentLabel}</span>
-                <ChevronDown
+                <CaretDown
                   className={cn(
                     'w-3.5 h-3.5 text-muted-foreground/60 transition-transform duration-150',
                     open && 'rotate-180',

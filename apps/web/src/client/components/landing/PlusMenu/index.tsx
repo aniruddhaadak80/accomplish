@@ -1,8 +1,6 @@
-// apps/desktop/src/renderer/components/landing/PlusMenu/index.tsx
-
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Plus, Paperclip } from 'lucide-react';
+import { Plus, Paperclip, FolderOpen } from '@phosphor-icons/react';
 import type { Skill, McpConnector } from '@accomplish_ai/agent-core/common';
 import {
   DropdownMenu,
@@ -17,14 +15,29 @@ import {
 import { SkillsSubmenu } from './SkillsSubmenu';
 import { ConnectorsSubmenu } from './ConnectorsSubmenu';
 import { CreateSkillModal } from '@/components/skills/CreateSkillModal';
+import { createLogger } from '@/lib/logger';
+
+const logger = createLogger('PlusMenu');
 
 interface PlusMenuProps {
   onSkillSelect: (command: string) => void;
   onOpenSettings: (tab: 'skills' | 'connectors') => void;
+  onAttachFiles?: () => void;
+  onSelectFolder?: (folderPath: string) => void;
   disabled?: boolean;
+  attachmentCount?: number;
+  maxAttachments?: number;
 }
 
-export function PlusMenu({ onSkillSelect, onOpenSettings, disabled }: PlusMenuProps) {
+export function PlusMenu({
+  onSkillSelect,
+  onOpenSettings,
+  onAttachFiles,
+  onSelectFolder,
+  disabled,
+  attachmentCount = 0,
+  maxAttachments = 5,
+}: PlusMenuProps) {
   const { t } = useTranslation('home');
   const [open, setOpen] = useState(false);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -32,18 +45,17 @@ export function PlusMenu({ onSkillSelect, onOpenSettings, disabled }: PlusMenuPr
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // Fetch enabled skills and connectors when dropdown opens
   useEffect(() => {
     if (open && window.accomplish) {
       window.accomplish
         .getEnabledSkills()
         .then((skills) => setSkills(skills.filter((s) => !s.isHidden)))
-        .catch((err) => console.error('Failed to load skills:', err));
+        .catch((err) => logger.error('Failed to load skills:', err));
 
       window.accomplish
         .getConnectors()
         .then(setConnectors)
-        .catch((err) => console.error('Failed to load connectors:', err));
+        .catch((err) => logger.error('Failed to load connectors:', err));
     }
   }, [open]);
 
@@ -52,15 +64,13 @@ export function PlusMenu({ onSkillSelect, onOpenSettings, disabled }: PlusMenuPr
     if (!accomplish || isRefreshing) return;
     setIsRefreshing(true);
     try {
-      // Run resync and minimum delay in parallel so animation is visible
       const [, updatedSkills] = await Promise.all([
         new Promise((resolve) => setTimeout(resolve, 600)),
         accomplish.resyncSkills().then(() => accomplish.getEnabledSkills()),
       ]);
-      // Filter out hidden skills for UI display
       setSkills(updatedSkills.filter((s) => !s.isHidden));
     } catch (err) {
-      console.error('Failed to refresh skills:', err);
+      logger.error('Failed to refresh skills:', err);
     } finally {
       setIsRefreshing(false);
     }
@@ -87,7 +97,7 @@ export function PlusMenu({ onSkillSelect, onOpenSettings, disabled }: PlusMenuPr
       await window.accomplish.setConnectorEnabled(id, enabled);
       setConnectors((prev) => prev.map((c) => (c.id === id ? { ...c, isEnabled: enabled } : c)));
     } catch (err) {
-      console.error('Failed to toggle connector:', err);
+      logger.error('Failed to toggle connector:', err);
     }
   }, []);
 
@@ -96,6 +106,22 @@ export function PlusMenu({ onSkillSelect, onOpenSettings, disabled }: PlusMenuPr
     onOpenSettings('connectors');
   };
 
+  const handleSelectFolder = useCallback(async () => {
+    setOpen(false);
+    const accomplish = window.accomplish;
+    if (!accomplish?.pickFolder) {
+      return;
+    }
+    try {
+      const folderPath = await accomplish.pickFolder();
+      if (folderPath) {
+        onSelectFolder?.(folderPath);
+      }
+    } catch (err) {
+      logger.error('Failed to pick folder:', err);
+    }
+  }, [onSelectFolder]);
+
   return (
     <>
       <CreateSkillModal open={createModalOpen} onOpenChange={setCreateModalOpen} />
@@ -103,20 +129,42 @@ export function PlusMenu({ onSkillSelect, onOpenSettings, disabled }: PlusMenuPr
         <DropdownMenuTrigger asChild>
           <button
             disabled={disabled}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex h-5 w-5 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
             title={t('plusMenu.addContent')}
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-4 w-4" weight="light" />
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-[200px]">
-          <DropdownMenuItem disabled className="text-muted-foreground/60">
+          <DropdownMenuItem
+            disabled={!onAttachFiles || attachmentCount >= maxAttachments}
+            onSelect={() => {
+              onAttachFiles?.();
+              setOpen(false);
+            }}
+          >
             <Paperclip className="h-4 w-4 mr-2 shrink-0" />
             {t('plusMenu.attachFiles')}
-            <span className="ml-auto pl-4 text-[10px] text-muted-foreground/50 whitespace-nowrap">
-              {t('plusMenu.soon')}
-            </span>
+            {attachmentCount > 0 && (
+              <span
+                className="ml-auto pl-4 text-[10px] text-muted-foreground whitespace-nowrap"
+                aria-label={`${attachmentCount} of ${maxAttachments} files attached`}
+              >
+                {attachmentCount}/{maxAttachments}
+              </span>
+            )}
           </DropdownMenuItem>
+
+          {window.accomplish?.pickFolder && onSelectFolder && (
+            <DropdownMenuItem
+              onSelect={() => {
+                void handleSelectFolder();
+              }}
+            >
+              <FolderOpen className="h-4 w-4 mr-2 shrink-0" />
+              {t('plusMenu.selectFolder')}
+            </DropdownMenuItem>
+          )}
 
           <DropdownMenuSeparator />
 
